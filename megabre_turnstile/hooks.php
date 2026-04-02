@@ -44,6 +44,24 @@ function megabre_turnstile_get_site_key()
 }
 
 /**
+ * Early interception for pages without dedicated validation hooks.
+ * hooks.php is loaded during init.php, BEFORE contact.php processes the form,
+ * so this check can block spam before the email is sent.
+ */
+if (
+    php_sapi_name() !== 'cli'
+    && basename($_SERVER['SCRIPT_NAME'] ?? '') === 'contact.php'
+    && $_SERVER['REQUEST_METHOD'] === 'POST'
+    && isset($_POST['action']) && $_POST['action'] === 'send'
+    && megabre_turnstile_is_enabled('enable_contact')
+) {
+    if (!isset($_POST['cf-turnstile-response']) || !megabre_turnstile_verify($_POST['cf-turnstile-response'])) {
+        unset($_POST['action']);
+        $_REQUEST['action'] = '';
+    }
+}
+
+/**
  * Register Smarty Function {display_turnstile}
  */
 add_hook('ClientAreaPageHooks', 1, function ($vars) {
@@ -157,8 +175,25 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
         if($custom) {
              $jsCode .= 'jQuery("' . $custom . '").before(\'' . $widgetHtml . '\');';
         } else {
-             $jsCode .= 'jQuery("form[action*=\'contact\'] button[type=\'submit\']").closest("p, div.text-center").before(\'' . $widgetHtml . '\');';
+             $jsCode .= 'if(jQuery(".megabre-contact-form-wrap").length) {
+                jQuery(".megabre-contact-form-wrap form button[type=\'submit\']").closest(".col-12").before(\'<div class="col-12">' . $widgetHtml . '</div>\');
+            } else {
+                jQuery("form[action*=\'contact\'] button[type=\'submit\']").closest("p, div.text-center, div.col-12, div.form-group").before(\'' . $widgetHtml . '\');
+            }';
         }
+        $jsCode .= '
+            jQuery("form[action*=\'contact.php\'], .megabre-contact-form-wrap form").on("submit", function(e) {
+                var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
+                if (!token) {
+                    e.preventDefault();
+                    alert("Lütfen captcha doğrulamasını tamamlayın.");
+                    return false;
+                }
+            });
+            if (window.location.search.indexOf("error=captcha") !== -1) {
+                jQuery(".megabre-contact-form-wrap, form[action*=\'contact.php\']").closest("section, .container").first()
+                    .prepend(\'<div class="alert alert-danger" style="margin-bottom:20px;">Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.</div>\');
+            }';
     }
 
     // Shopping Cart / Checkout
@@ -217,10 +252,13 @@ add_hook('TicketOpenValidation', 1, function ($vars) {
 });
 
 // Contact Form Validation
-add_hook('ContactForm', 1, function ($vars) {
-    if (megabre_turnstile_is_enabled('enable_contact')) {
+add_hook('ClientAreaPageContact', 1, function ($vars) {
+    if (megabre_turnstile_is_enabled('enable_contact') && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (!isset($_POST['action']) || $_POST['action'] !== 'send') return;
+
         if (!isset($_POST['cf-turnstile-response']) || !megabre_turnstile_verify($_POST['cf-turnstile-response'])) {
-            return "Captcha doğrulaması başarısız oldu.";
+            header("Location: contact.php?error=captcha");
+            exit;
         }
     }
 });
