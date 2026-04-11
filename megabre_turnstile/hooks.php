@@ -62,6 +62,57 @@ if (
 }
 
 /**
+ * Early interception: WHMCS 8+ posts client login to index.php (routed URL), not dologin.php.
+ * UserLoginVerification is not documented and is not invoked on current WHMCS builds, so login was effectively unchecked.
+ */
+if (
+    php_sapi_name() !== 'cli'
+    && (!defined('ADMINAREA') || !ADMINAREA)
+    && isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST'
+    && megabre_turnstile_is_enabled('enable_login')
+) {
+    $script = basename($_SERVER['SCRIPT_NAME'] ?? '');
+    $path = strtolower((string)($_SERVER['SCRIPT_NAME'] ?? ''));
+    if (strpos($path, '/admin/') === false && strpos($path, '\\admin\\') === false
+        && ($script === 'index.php' || $script === 'dologin.php')
+        && isset($_POST['username'], $_POST['password'])
+        && is_string($_POST['username']) && is_string($_POST['password'])
+        && $_POST['username'] !== '' && $_POST['password'] !== ''
+    ) {
+        $token = isset($_POST['cf-turnstile-response']) ? trim((string) $_POST['cf-turnstile-response']) : '';
+        if ($token === '' || !megabre_turnstile_verify($token)) {
+            header('Location: login.php?error=captcha');
+            exit;
+        }
+    }
+}
+
+/**
+ * Early interception: password reset email step posts to index.php (routed). ClientAreaPagePasswordReset is for template data,
+ * not a reliable pre-submit gate on all WHMCS versions.
+ */
+if (
+    php_sapi_name() !== 'cli'
+    && (!defined('ADMINAREA') || !ADMINAREA)
+    && isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST'
+    && megabre_turnstile_is_enabled('enable_pwreset')
+    && isset($_POST['action']) && $_POST['action'] === 'reset'
+    && isset($_POST['email']) && is_string($_POST['email']) && trim($_POST['email']) !== ''
+) {
+    $script = basename($_SERVER['SCRIPT_NAME'] ?? '');
+    $path = strtolower((string)($_SERVER['SCRIPT_NAME'] ?? ''));
+    if (strpos($path, '/admin/') === false && strpos($path, '\\admin\\') === false
+        && ($script === 'index.php' || $script === 'pwreset.php')
+    ) {
+        $token = isset($_POST['cf-turnstile-response']) ? trim((string) $_POST['cf-turnstile-response']) : '';
+        if ($token === '' || !megabre_turnstile_verify($token)) {
+            header('Location: pwreset.php?error=captcha');
+            exit;
+        }
+    }
+}
+
+/**
  * Register Smarty Function {display_turnstile}
  */
 add_hook('ClientAreaPageHooks', 1, function ($vars) {
@@ -124,15 +175,34 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
     if ($templatefile == 'login' && megabre_turnstile_is_enabled('enable_login')) {
         $custom = megabre_turnstile_get_setting('custom_login_sel');
         if ($custom) {
-            $jsCode .= 'jQuery("' . $custom . '").before(\'' . $widgetHtml . '\');';
+            $sel = addslashes($custom);
+            $jsCode .= 'jQuery("' . $sel . '").before(\'' . $widgetHtml . '\');';
+            $jsCode .= 'jQuery("' . $sel . '").closest("form").on("submit", function(e) {
+                var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
+                if (!token) { e.preventDefault(); alert("Lütfen captcha doğrulamasını tamamlayın."); return false; }
+            });';
         } else {
-            // Default logic including Megatech
+            // Default logic including Megatech + WHMCS 8+ routed login (login.php / index.php?rp=.../login/validate)
             $jsCode .= 'if(jQuery(".megabre-login-wrap").length) {
                  jQuery(".megabre-login-wrap form button[type=\'submit\']").closest("button").before(\'' . $widgetHtml . '\');
             } else {
-                 jQuery("form[action*=\'dologin\'] button[type=\'submit\']").closest("div.form-group, div.mb-3").before(\'' . $widgetHtml . '\');
+                 jQuery("form.login-form, form[action*=\'dologin\'], form[action*=\'login/validate\'], form[action*=\'login%2fvalidate\']")
+                    .find("button[type=\'submit\'], input[type=\'submit\']").first().closest("div.form-group, div.mb-3, .float-left, .text-center").before(\'' . $widgetHtml . '\');
             }';
         }
+        $jsCode .= '
+            jQuery("form.login-form, .megabre-login-wrap form, form[action*=\'dologin\'], form[action*=\'login/validate\'], form[action*=\'login%2fvalidate\']").on("submit", function(e) {
+                var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
+                if (!token) {
+                    e.preventDefault();
+                    alert("Lütfen captcha doğrulamasını tamamlayın.");
+                    return false;
+                }
+            });
+            if (window.location.search.indexOf("error=captcha") !== -1) {
+                jQuery(".megabre-login-wrap, form.login-form").closest("section, .container, .card, main").first()
+                    .prepend(\'<div class="alert alert-danger" style="margin-bottom:20px;">Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.</div>\');
+            }';
     }
 
     // Register
@@ -152,11 +222,31 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
     // Password Reset
     if ($templatefile == 'password-reset-container' && megabre_turnstile_is_enabled('enable_pwreset')) {
         $custom = megabre_turnstile_get_setting('custom_pwreset_sel');
-        if($custom) {
-             $jsCode .= 'jQuery("' . $custom . '").before(\'' . $widgetHtml . '\');';
+        if ($custom) {
+            $sel = addslashes($custom);
+            $jsCode .= 'jQuery("' . $sel . '").before(\'' . $widgetHtml . '\');';
+            $jsCode .= 'jQuery("' . $sel . '").closest("form").on("submit", function(e) {
+                var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
+                if (!token) { e.preventDefault(); alert("Lütfen captcha doğrulamasını tamamlayın."); return false; }
+            });';
         } else {
-             $jsCode .= 'jQuery("form[action*=\'pwreset\'] button[type=\'submit\']").closest("div").before(\'' . $widgetHtml . '\');';
+             $jsCode .= 'jQuery("form[action*=\'pwreset\'], form[action*=\'password-reset\'], form[action*=\'password%2freset\']")
+                .has("input[name=\'email\'][type=\'email\'], input[name=\'email\']").find("button[type=\'submit\']").closest("div.form-group, div.text-center, .col-12, div").first().before(\'' . $widgetHtml . '\');';
         }
+        $jsCode .= '
+            jQuery("form[action*=\'password-reset-validate-email\'], form[action*=\'password%2freset%2fvalidate-email\'], form[action*=\'pwreset\']").on("submit", function(e) {
+                if (jQuery(this).find(\'input[name="email"]\').length === 0) return;
+                var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
+                if (!token) {
+                    e.preventDefault();
+                    alert("Lütfen captcha doğrulamasını tamamlayın.");
+                    return false;
+                }
+            });
+            if (window.location.search.indexOf("error=captcha") !== -1) {
+                jQuery("form[action*=\'password-reset\'], form[action*=\'pwreset\']").closest("section, .container, .card, main").first()
+                    .prepend(\'<div class="alert alert-danger" style="margin-bottom:20px;">Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.</div>\');
+            }';
     }
 
     // Support Ticket
@@ -218,7 +308,8 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
 // Login Validation
 add_hook('UserLoginVerification', 1, function ($vars) {
     if (megabre_turnstile_is_enabled('enable_login')) {
-        if (!isset($_POST['cf-turnstile-response']) || !megabre_turnstile_verify($_POST['cf-turnstile-response'])) {
+        $token = isset($_POST['cf-turnstile-response']) ? trim((string) $_POST['cf-turnstile-response']) : '';
+        if ($token === '' || !megabre_turnstile_verify($token)) {
             return "Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.";
         }
     }
@@ -263,14 +354,3 @@ add_hook('ClientAreaPageContact', 1, function ($vars) {
     }
 });
 
-// PW Reset Validation
-add_hook('ClientAreaPagePasswordReset', 1, function($vars) {
-    if (megabre_turnstile_is_enabled('enable_pwreset') && $_SERVER['REQUEST_METHOD'] === 'POST') {
-         if (!isset($_POST['email'])) return;
-         
-         if (!isset($_POST['cf-turnstile-response']) || !megabre_turnstile_verify($_POST['cf-turnstile-response'])) {
-             header("Location: pwreset.php?error=captcha");
-             exit;
-         }
-    }
-});
