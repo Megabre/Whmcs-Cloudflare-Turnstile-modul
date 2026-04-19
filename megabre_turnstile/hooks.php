@@ -226,39 +226,48 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
         }
     }
 
-    // Password Reset
-    if ($templatefile == 'password-reset-container' && megabre_turnstile_is_enabled('enable_pwreset')) {
-        $custom = megabre_turnstile_get_setting('custom_pwreset_sel');
-        if ($custom) {
-            $sel = addslashes($custom);
+    /*
+     * Password reset: do NOT rely on $templatefile (WHMCS 8–10 / child themes may use different names).
+     * If the condition never matched, $jsCode stayed empty and nothing ran — Turnstile never appeared.
+     * We detect the standard email step by hidden input name="action" value="reset" (WHMCS core forms).
+     */
+    if (megabre_turnstile_is_enabled('enable_pwreset')) {
+        $customPw = megabre_turnstile_get_setting('custom_pwreset_sel');
+        if ($customPw && trim($customPw) !== '') {
+            $sel = addslashes($customPw);
             $jsCode .= 'jQuery("' . $sel . '").before(\'' . $widgetHtml . '\');';
             $jsCode .= 'jQuery("' . $sel . '").closest("form").on("submit", function(e) {
                 var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
                 if (!token) { e.preventDefault(); alert("Lütfen captcha doğrulamasını tamamlayın."); return false; }
             });';
         } else {
-            // Prefer hidden action=reset (email step); fall back to action URL — avoids fragile .has() on action strings
-            $jsCode .= 'var $pwForm = jQuery(\'form:has(input[type="hidden"][name="action"][value="reset"])\').first();
-                if (!$pwForm.length) {
-                    $pwForm = jQuery("form[action*=\'password-reset-validate-email\'], form[action*=\'password%2freset%2fvalidate-email\'], form[action*=\'pwreset\'], form[action*=\'password-reset\']");
-                }
-                $pwForm.find("button[type=\'submit\'], input[type=\'submit\']").first()
-                    .closest("div.form-group, div.text-center, .col-12, p, div").before(\'' . $widgetHtml . '\');';
+            $widgetJson = json_encode($widgetHtml, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+            $jsCode .= '(function(w){
+                var $in = jQuery(\'input[type="hidden"][name="action"][value="reset"]\');
+                if (!$in.length) return;
+                var $f = $in.closest("form");
+                if (!$f.length || $f.find(".cf-turnstile").length) return;
+                var $btn = $f.find("button[type=\'submit\'],input[type=\'submit\']").first();
+                if ($btn.length) { $btn.before(w); }
+            })(' . $widgetJson . ');';
+            $jsCode .= '
+                jQuery(\'input[type="hidden"][name="action"][value="reset"]\').closest("form").off("submit.megabrePw").on("submit.megabrePw", function(e) {
+                    if (jQuery(this).find(\'input[name="email"]\').length === 0) return;
+                    var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
+                    if (!token) {
+                        e.preventDefault();
+                        alert("Lütfen captcha doğrulamasını tamamlayın.");
+                        return false;
+                    }
+                });
+                if (window.location.search.indexOf("error=captcha") !== -1) {
+                    var $pwf = jQuery(\'input[type="hidden"][name="action"][value="reset"]\').closest("form");
+                    if ($pwf.length) {
+                        $pwf.closest("section,.container,.card,main,.login_form,.login-page,.megabre-form-wrap").first()
+                            .prepend(\'<div class="alert alert-danger" style="margin-bottom:20px;">Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.</div>\');
+                    }
+                }';
         }
-        $jsCode .= '
-            jQuery(\'form:has(input[type="hidden"][name="action"][value="reset"]), form[action*=\'password-reset-validate-email\'], form[action*=\'password%2freset%2fvalidate-email\'], form[action*=\'pwreset\']").on("submit", function(e) {
-                if (jQuery(this).find(\'input[name="email"]\').length === 0) return;
-                var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
-                if (!token) {
-                    e.preventDefault();
-                    alert("Lütfen captcha doğrulamasını tamamlayın.");
-                    return false;
-                }
-            });
-            if (window.location.search.indexOf("error=captcha") !== -1) {
-                jQuery(\'form:has(input[type="hidden"][name="action"][value="reset"]), form[action*=\'password-reset\'], form[action*=\'pwreset\']").closest("section, .container, .card, main").first()
-                    .prepend(\'<div class="alert alert-danger" style="margin-bottom:20px;">Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.</div>\');
-            }';
     }
 
     // Support Ticket
