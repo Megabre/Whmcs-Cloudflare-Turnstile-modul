@@ -15,7 +15,7 @@ function megabre_turnstile_config()
         'description' => 'Replaces reCAPTCHA with Cloudflare Turnstile. Manage settings below in the output area.',
         'author' => 'Megabre',
         'language' => 'english',
-        'version' => '1.2.1',
+        'version' => '1.2.3',
         'fields' => [
             'site_key' => ['FriendlyName' => 'Site Key', 'Type' => 'text', 'Size' => '50', 'Description' => 'Managed via main interface'],
             'secret_key' => ['FriendlyName' => 'Secret Key', 'Type' => 'password', 'Size' => '50', 'Description' => 'Managed via main interface'],
