@@ -211,10 +211,17 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
         if ($custom) {
              $jsCode .= 'jQuery("' . $custom . '").before(\'' . $widgetHtml . '\');';
         } else {
+            // WHMCS 8+ Twenty-One: no #btnRegister — form is #frmCheckout with hidden name="register"
             $jsCode .= 'if(jQuery(".megabre-register-wrap").length) {
                 jQuery(".megabre-register-wrap form button[type=\'submit\']").closest("button").before(\'' . $widgetHtml . '\');
             } else {
-                jQuery("#btnRegister").closest("div.form-group, div.mb-3").before(\'' . $widgetHtml . '\');
+                var $regBtn = jQuery("#btnRegister");
+                if ($regBtn.length) {
+                    $regBtn.closest("div.form-group, div.mb-3").before(\'' . $widgetHtml . '\');
+                } else {
+                    jQuery(\'form:has(input[name="register"][value="true"]), form#frmCheckout\').find("input[type=\'submit\'], button[type=\'submit\']").first()
+                        .closest("p.text-center, div.text-center, div.form-group, .card-body").before(\'' . $widgetHtml . '\');
+                }
             }';
         }
     }
@@ -230,11 +237,16 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
                 if (!token) { e.preventDefault(); alert("Lütfen captcha doğrulamasını tamamlayın."); return false; }
             });';
         } else {
-             $jsCode .= 'jQuery("form[action*=\'pwreset\'], form[action*=\'password-reset\'], form[action*=\'password%2freset\']")
-                .has("input[name=\'email\'][type=\'email\'], input[name=\'email\']").find("button[type=\'submit\']").closest("div.form-group, div.text-center, .col-12, div").first().before(\'' . $widgetHtml . '\');';
+            // Prefer hidden action=reset (email step); fall back to action URL — avoids fragile .has() on action strings
+            $jsCode .= 'var $pwForm = jQuery(\'form:has(input[type="hidden"][name="action"][value="reset"])\').first();
+                if (!$pwForm.length) {
+                    $pwForm = jQuery("form[action*=\'password-reset-validate-email\'], form[action*=\'password%2freset%2fvalidate-email\'], form[action*=\'pwreset\'], form[action*=\'password-reset\']");
+                }
+                $pwForm.find("button[type=\'submit\'], input[type=\'submit\']").first()
+                    .closest("div.form-group, div.text-center, .col-12, p, div").before(\'' . $widgetHtml . '\');';
         }
         $jsCode .= '
-            jQuery("form[action*=\'password-reset-validate-email\'], form[action*=\'password%2freset%2fvalidate-email\'], form[action*=\'pwreset\']").on("submit", function(e) {
+            jQuery(\'form:has(input[type="hidden"][name="action"][value="reset"]), form[action*=\'password-reset-validate-email\'], form[action*=\'password%2freset%2fvalidate-email\'], form[action*=\'pwreset\']").on("submit", function(e) {
                 if (jQuery(this).find(\'input[name="email"]\').length === 0) return;
                 var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
                 if (!token) {
@@ -244,7 +256,7 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
                 }
             });
             if (window.location.search.indexOf("error=captcha") !== -1) {
-                jQuery("form[action*=\'password-reset\'], form[action*=\'pwreset\']").closest("section, .container, .card, main").first()
+                jQuery(\'form:has(input[type="hidden"][name="action"][value="reset"]), form[action*=\'password-reset\'], form[action*=\'pwreset\']").closest("section, .container, .card, main").first()
                     .prepend(\'<div class="alert alert-danger" style="margin-bottom:20px;">Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.</div>\');
             }';
     }
