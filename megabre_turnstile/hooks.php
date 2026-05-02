@@ -43,6 +43,107 @@ function megabre_turnstile_get_site_key()
     return megabre_turnstile_get_setting('site_key');
 }
 
+function megabre_turnstile_lang_root()
+{
+    if (defined('ROOTDIR') && is_string(ROOTDIR) && ROOTDIR !== '') {
+        return ROOTDIR;
+    }
+    $resolved = realpath(__DIR__ . '/../../..');
+    return $resolved ?: __DIR__;
+}
+
+/**
+ * @return list<string> Absolute paths to try in order (session language, then english fallback).
+ */
+function megabre_turnstile_lang_file_candidates()
+{
+    $langDir = megabre_turnstile_lang_root() . DIRECTORY_SEPARATOR . 'lang';
+    if (!is_dir($langDir)) {
+        return [];
+    }
+    $codes = [];
+    if (function_exists('session_status') && session_status() === PHP_SESSION_ACTIVE) {
+        if (!empty($_SESSION['Language'])) {
+            $codes[] = (string) $_SESSION['Language'];
+        }
+        if (!empty($_SESSION['locale'])) {
+            $codes[] = (string) $_SESSION['locale'];
+        }
+    }
+    $files = [];
+    foreach ($codes as $raw) {
+        $code = strtolower(preg_replace('/\.php$/', '', trim(basename($raw))));
+        $code = preg_replace('/[^a-z0-9_\-]/', '', $code);
+        if ($code === '') {
+            continue;
+        }
+        $f = $langDir . DIRECTORY_SEPARATOR . $code . '.php';
+        if (is_file($f) && !in_array($f, $files, true)) {
+            $files[] = $f;
+        }
+    }
+    $eng = $langDir . DIRECTORY_SEPARATOR . 'english.php';
+    if (is_file($eng) && !in_array($eng, $files, true)) {
+        $files[] = $eng;
+    }
+    return $files;
+}
+
+function megabre_turnstile_load_lang_array_from_path($path)
+{
+    if (!is_file($path)) {
+        return [];
+    }
+    $_LANG = [];
+    /** @noinspection PhpIncludeInspection */
+    include $path;
+    return isset($_LANG) && is_array($_LANG) ? $_LANG : [];
+}
+
+/**
+ * Active WHMCS language pack ($GLOBALS['_LANG']) when available; otherwise lang/*.php from session + english.
+ */
+function megabre_turnstile_client_lang_array()
+{
+    if (!empty($GLOBALS['_LANG']) && is_array($GLOBALS['_LANG'])) {
+        return $GLOBALS['_LANG'];
+    }
+    foreach (megabre_turnstile_lang_file_candidates() as $file) {
+        $arr = megabre_turnstile_load_lang_array_from_path($file);
+        if (!empty($arr)) {
+            return $arr;
+        }
+    }
+    return [];
+}
+
+/**
+ * @param 'prompt'|'error' $key prompt = client JS alert ($_LANG['captchaIncorrect']); error = $_LANG['captcha']['verification']['failed'] with fallbacks
+ */
+function megabre_turnstile_text($key)
+{
+    static $resolved = null;
+    if ($resolved === null) {
+        $lang = megabre_turnstile_client_lang_array();
+        $resolved = [
+            'prompt' => !empty($lang['captchaIncorrect'])
+                ? $lang['captchaIncorrect']
+                : 'Complete the captcha and try again.',
+            'error' => !empty($lang['captcha']['verification']['failed'])
+                ? $lang['captcha']['verification']['failed']
+                : (!empty($lang['captchaIncorrect'])
+                    ? $lang['captchaIncorrect']
+                    : 'Captcha verification failed. Please try again.'),
+        ];
+    }
+    return $resolved[$key] ?? '';
+}
+
+function megabre_turnstile_js_string($key)
+{
+    return json_encode(megabre_turnstile_text($key), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+}
+
 /**
  * Early interception for pages without dedicated validation hooks.
  * hooks.php is loaded during init.php, BEFORE contact.php processes the form,
@@ -150,13 +251,28 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
     
     // CSS to hide default captcha
     $css = '<style>
-        .g-recaptcha, #google-recaptcha-domainchecker, .recaptcha-container { display: none !important; }
-        div[class*="captcha"] { display: none !important; } 
-        /* Re-show our widget if it got hidden by generic selector */
-        .cf-turnstile { display: block !important; }
+        .g-recaptcha,
+        #google-recaptcha-domainchecker,
+        .recaptcha-container,
+        #default-captcha-domainchecker,
+        .default-captcha,
+        #captchaContainer,
+        #inputCaptcha,
+        #inputCaptchaImage {
+            display: none !important;
+        }
+        /* Keep Turnstile and checkout button containers visible */
+        .cf-turnstile,
+        .tt-captcha-join-mail {
+            display: block !important;
+        }
     </style>';
 
     $jsCode = '';
+
+    $tsAlertJs = megabre_turnstile_js_string('prompt');
+    $tsBannerHtml = '<div class="alert alert-danger" style="margin-bottom:20px;">' . htmlspecialchars(megabre_turnstile_text('error'), ENT_QUOTES, 'UTF-8') . '</div>';
+    $tsBannerJs = json_encode($tsBannerHtml, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 
     // Helper to get selector
     $getSelector = function($configName, $defaults) {
@@ -179,7 +295,7 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
             $jsCode .= 'jQuery("' . $sel . '").before(\'' . $widgetHtml . '\');';
             $jsCode .= 'jQuery("' . $sel . '").closest("form").on("submit", function(e) {
                 var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
-                if (!token) { e.preventDefault(); alert("Lütfen captcha doğrulamasını tamamlayın."); return false; }
+                if (!token) { e.preventDefault(); alert(' . $tsAlertJs . '); return false; }
             });';
         } else {
             // Default logic including Megatech + WHMCS 8+ routed login (login.php / index.php?rp=.../login/validate)
@@ -195,13 +311,13 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
                 var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
                 if (!token) {
                     e.preventDefault();
-                    alert("Lütfen captcha doğrulamasını tamamlayın.");
+                    alert(' . $tsAlertJs . ');
                     return false;
                 }
             });
             if (window.location.search.indexOf("error=captcha") !== -1) {
                 jQuery(".megabre-login-wrap, form.login-form").closest("section, .container, .card, main").first()
-                    .prepend(\'<div class="alert alert-danger" style="margin-bottom:20px;">Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.</div>\');
+                    .prepend(' . $tsBannerJs . ');
             }';
     }
 
@@ -238,7 +354,7 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
             $jsCode .= 'jQuery("' . $sel . '").before(\'' . $widgetHtml . '\');';
             $jsCode .= 'jQuery("' . $sel . '").closest("form").on("submit", function(e) {
                 var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
-                if (!token) { e.preventDefault(); alert("Lütfen captcha doğrulamasını tamamlayın."); return false; }
+                if (!token) { e.preventDefault(); alert(' . $tsAlertJs . '); return false; }
             });';
         } else {
             $widgetJson = json_encode($widgetHtml, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
@@ -256,7 +372,7 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
                     var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
                     if (!token) {
                         e.preventDefault();
-                        alert("Lütfen captcha doğrulamasını tamamlayın.");
+                        alert(' . $tsAlertJs . ');
                         return false;
                     }
                 });
@@ -264,7 +380,7 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
                     var $pwf = jQuery(\'input[type="hidden"][name="action"][value="reset"]\').closest("form");
                     if ($pwf.length) {
                         $pwf.closest("section,.container,.card,main,.login_form,.login-page,.megabre-form-wrap").first()
-                            .prepend(\'<div class="alert alert-danger" style="margin-bottom:20px;">Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.</div>\');
+                            .prepend(' . $tsBannerJs . ');
                     }
                 }';
         }
@@ -297,17 +413,66 @@ add_hook('ClientAreaFooterOutput', 1, function ($vars) {
                 var token = jQuery(this).find("[name=\'cf-turnstile-response\']").val();
                 if (!token) {
                     e.preventDefault();
-                    alert("Lütfen captcha doğrulamasını tamamlayın.");
+                    alert(' . $tsAlertJs . ');
                     return false;
                 }
             });
             if (window.location.search.indexOf("error=captcha") !== -1) {
                 jQuery(".megabre-contact-form-wrap, form[action*=\'contact.php\']").closest("section, .container").first()
-                    .prepend(\'<div class="alert alert-danger" style="margin-bottom:20px;">Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.</div>\');
+                    .prepend(' . $tsBannerJs . ');
             }';
     }
 
-    // Shopping Cart / Checkout
+    /*
+     * Checkout "Existing Customer Login" uses AJAX (POST .../login/cart) — not the login.tpl form.
+     * Early login interception still requires cf-turnstile-response whenever enable_login is on.
+     * Without this, WHMCS redirects to login.php?error=captcha and jqClient sees parsererror (expects JSON).
+     */
+    if ((strpos($templatefile, 'checkout') !== false || $filename == 'cart') && megabre_turnstile_is_enabled('enable_login')) {
+        $widgetJson = json_encode($widgetHtml, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+        $jsCode .= '(function(w) {
+            var $b = jQuery("#btnExistingLogin");
+            if (!$b.length) return;
+            var $scope = jQuery("#containerExistingUserSignin");
+            if (!$scope.length) { $scope = $b.closest("form").length ? $b.closest("form") : $b.parent(); }
+            if ($scope.find(".cf-turnstile").length) return;
+            $b.before(w);
+        })(' . $widgetJson . ');';
+        $jsCode .= '
+        function megabreTurnstileCheckoutCartToken() {
+            var $scope = jQuery("#containerExistingUserSignin");
+            if (!$scope.length) { $scope = jQuery("#btnExistingLogin").parent(); }
+            var $t = $scope.find("[name=\'cf-turnstile-response\']");
+            return ($t.length && $t.val()) ? $t.val() : "";
+        }
+        jQuery.ajaxPrefilter(function(options) {
+            var url = String(options.url || "");
+            if (url.indexOf("login/cart") === -1) return;
+            var token = megabreTurnstileCheckoutCartToken();
+            if (jQuery.isPlainObject(options.data)) {
+                options.data["cf-turnstile-response"] = token;
+            } else if (typeof options.data === "string") {
+                options.data += (options.data.length ? "&" : "") + "cf-turnstile-response=" + encodeURIComponent(token);
+            }
+        });
+        document.addEventListener("click", function(e) {
+            if (!e.target || !e.target.closest || !e.target.closest("#btnExistingLogin")) return;
+            if (!megabreTurnstileCheckoutCartToken()) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                alert(' . $tsAlertJs . ');
+            }
+        }, true);
+        jQuery(document).ajaxError(function(event, jqXHR, ajaxSettings) {
+            var url = String(ajaxSettings.url || "");
+            if (url.indexOf("login/cart") === -1) return;
+            if (typeof window.turnstile === "undefined" || typeof turnstile.reset !== "function") return;
+            var el = document.querySelector("#containerExistingUserSignin .cf-turnstile");
+            if (el) { try { turnstile.reset(el); } catch (err) {} }
+        });';
+    }
+
+    // Shopping Cart / Checkout — complete order (separate from AJAX login above)
     if ((strpos($templatefile, 'checkout') !== false || $filename == 'cart') && megabre_turnstile_is_enabled('enable_cart')) {
         $custom = megabre_turnstile_get_setting('custom_cart_sel');
         if($custom) {
@@ -331,7 +496,7 @@ add_hook('UserLoginVerification', 1, function ($vars) {
     if (megabre_turnstile_is_enabled('enable_login')) {
         $token = isset($_POST['cf-turnstile-response']) ? trim((string) $_POST['cf-turnstile-response']) : '';
         if ($token === '' || !megabre_turnstile_verify($token)) {
-            return "Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.";
+            return megabre_turnstile_text('error');
         }
     }
 });
@@ -340,7 +505,7 @@ add_hook('UserLoginVerification', 1, function ($vars) {
 add_hook('ClientDetailsValidation', 1, function ($vars) {
     if (!isset($_SESSION['uid']) && megabre_turnstile_is_enabled('enable_register')) {
         if (!isset($_POST['cf-turnstile-response']) || !megabre_turnstile_verify($_POST['cf-turnstile-response'])) {
-            return ["Captcha doğrulaması başarısız oldu."];
+            return [megabre_turnstile_text('error')];
         }
     }
 });
@@ -349,7 +514,7 @@ add_hook('ClientDetailsValidation', 1, function ($vars) {
 add_hook('ShoppingCartValidateCheckout', 1, function ($vars) {
     if (megabre_turnstile_is_enabled('enable_cart')) {
         if (!isset($_POST['cf-turnstile-response']) || !megabre_turnstile_verify($_POST['cf-turnstile-response'])) {
-            return "Captcha doğrulaması başarısız oldu. Lütfen tekrar deneyin.";
+            return megabre_turnstile_text('error');
         }
     }
 });
@@ -358,7 +523,7 @@ add_hook('ShoppingCartValidateCheckout', 1, function ($vars) {
 add_hook('TicketOpenValidation', 1, function ($vars) {
     if (megabre_turnstile_is_enabled('enable_ticket')) {
         if (!isset($_POST['cf-turnstile-response']) || !megabre_turnstile_verify($_POST['cf-turnstile-response'])) {
-            return "Captcha doğrulaması başarısız oldu.";
+            return megabre_turnstile_text('error');
         }
     }
 });
